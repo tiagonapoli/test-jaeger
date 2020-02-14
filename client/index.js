@@ -1,8 +1,9 @@
-const axios = require("axios");
-const initJaegerTracer = require("jaeger-client").initTracer;
+const express = require("express");
+const bodyParser = require("body-parser");
+const jaegerClient = require("jaeger-client");
+const opentracing = require("opentracing");
 
-const tracer = initTracer("hello-world");
-const assert = require("assert");
+const app = express();
 
 function initTracer(serviceName) {
   const config = {
@@ -25,8 +26,12 @@ function initTracer(serviceName) {
       }
     }
   };
-  return initJaegerTracer(config, options);
+  return jaegerClient.initTracer(config, options);
 }
+
+const axios = require("axios");
+const jaegerClient = require("jaeger-client");
+const opentracing = require("opentracing");
 
 const sleep = ms => {
   return new Promise(resolve => {
@@ -34,27 +39,36 @@ const sleep = ms => {
   });
 };
 
-const httpPost = async (port, body) => {
-  const { data } = await axios.post(`http://localhost:${port}`, body);
-  return data;
+const httpPost = async (port, body, rootSpan) => {
+  const headers = {};
+  const span = tracer.startSpan(`request:${port}`, { childOf: rootSpan });
+  tracer.inject(span, opentracing.FORMAT_HTTP_HEADERS, headers);
+  // console.log(headers);
+  try {
+    const { data } = await axios.post(`http://localhost:${port}`, body, {
+      headers
+    });
+    span.finish();
+    return data;
+  } catch (err) {
+    span.setTag(opentracing.Tags.HTTP_STATUS_CODE, err.response.status);
+    span.finish();
+  }
 };
 
 const formatString = async (rootSpan, helloTo) => {
   const span = tracer.startSpan("formatString", { childOf: rootSpan });
-  const helloStr = `Hello, ${helloTo}!`;
-  span.log({
-    event: "string-format",
-    value: helloStr
-  });
+  const { message: formatted } = await httpPost(3001, { name: helloTo }, span);
+  console.log("formatted", formatted, helloTo);
   await sleep(1000);
   span.finish();
-  return helloStr;
+  return formatted;
 };
 
 const printHello = async (rootSpan, helloStr) => {
   const span = tracer.startSpan("printHello", { childOf: rootSpan });
+  await httpPost(3000, { message: helloStr }, span);
   await sleep(2000);
-  console.log(helloStr);
   span.log({ event: "print-string" });
   span.finish();
 };
@@ -69,16 +83,15 @@ const sayHello = async helloTo => {
   span.finish();
 };
 
-const go = async () => {
-  await sayHello(helloTo);
-  wtf.dump();
-};
+const tracer = initTracer("client-service");
+app.use(bodyParser.json());
 
-assert(process.argv.length == 3, "Expecting one argument");
-const helloTo = process.argv[2];
+app.use("/", async (req, res) => {
+  const { name } = req.body;
+  await sayHello(name);
+  res.status(200).end("finished");
+});
 
-go().then(() => {
-  tracer.close(() => {
-    process.exit(1);
-  });
+app.listen(3000, () => {
+  console.log("Client-service listening on port 3000");
 });
